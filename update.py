@@ -5,6 +5,7 @@ import json, os, sys, time, datetime as dt, urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 URL = 'https://www.bmv.com.mx/es/Grupo_BMV/GraficaHistorica?idSitioPagina=1&idEmision={}'
+URL_HOY = 'https://www.bmv.com.mx/es/Grupo_BMV/BmvJsonGeneric?idSitioPagina=1&bandera=1&idEmisora={}&idEmision={}'
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 
 
@@ -21,21 +22,34 @@ def save(name, obj):
         json.dump(obj, f, ensure_ascii=False, separators=(',', ':'))
 
 
-def fetch(id_emision, tries=3):
-    """Daily prices of one BMV series as {YYYY-MM-DD: price}."""
+def get_json(url, tries=3):
     last = None
     for k in range(tries):
         try:
-            req = urllib.request.Request(URL.format(id_emision), headers={'User-Agent': UA, 'Accept': 'application/json,text/plain,*/*'})
+            req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/json,text/plain,*/*'})
             with urllib.request.urlopen(req, timeout=40) as r:
                 txt = r.read().decode('utf-8', 'replace')
-            txt = txt[txt.index('{'): txt.rindex('}') + 1]          # quita "for(;;);(" y el comentario final
-            pts = json.loads(txt)['response']['datosGrafica']['mapaValoresGraficaVolumen']
-            return {dt.datetime.fromtimestamp(ts / 1000, dt.timezone.utc).strftime('%Y-%m-%d'): float(v) for ts, v in pts if v is not None}
+            return json.loads(txt[txt.index('{'): txt.rindex('}') + 1])   # quita "for(;;);(" y el comentario final
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(3 * (k + 1))
-    raise RuntimeError(f'idEmision {id_emision}: {last}')
+    raise RuntimeError(f'{url}: {last}')
+
+
+def day(ts):
+    return dt.datetime.fromtimestamp(ts / 1000, dt.timezone.utc).strftime('%Y-%m-%d')
+
+
+def fetch(id_emision):
+    """Historia diaria (~1 año) de una serie BMV: {AAAA-MM-DD: precio}."""
+    pts = get_json(URL.format(id_emision))['response']['datosGrafica']['mapaValoresGraficaVolumen']
+    return {day(ts): float(v) for ts, v in pts if v is not None}
+
+
+def fetch_today(id_emisora, id_emision):
+    """Precio del día (la BMV lo publica de madrugada, antes de que entre a la historia)."""
+    pts = get_json(URL_HOY.format(id_emisora, id_emision))['response']['datosGrafica']['mapaValoresGrafica']
+    return {day(ts): float(v) for ts, v in pts if v is not None}
 
 
 def update_prices(cfg, prices):
@@ -46,8 +60,13 @@ def update_prices(cfg, prices):
         except Exception as e:  # noqa: BLE001
             errors.append(str(e))
             continue
+        try:                                   # precio de hoy, si aún no está en la historia
+            hoy = fetch_today(fund['idEmisora'], fund['idEmision'])
+            new.update({d: v for d, v in hoy.items() if not new or d > max(new)})
+        except Exception as e:  # noqa: BLE001
+            errors.append('hoy ' + str(e))
         prices.setdefault(key, {}).update(new)
-        time.sleep(0.4)
+        time.sleep(0.3)
     return errors
 
 
